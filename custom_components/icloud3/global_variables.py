@@ -85,9 +85,6 @@ class GlobalVariables(object):
     OptionsFlowHandler  = None   # config_flow OptionsFlowHandler
     ActionsFlow         = None
     ActionsOptionsFlow  = None
-    MobileApp_data      = {}     # mobile_app Integration data dict from hass.data['mobile_app']
-    MobileApp_devices   = {}     # mobile_app Integration devices dict from hass.data['mobile_app']['devices]
-
 
     EvLog               = None
     EvLogSensor         = None
@@ -100,6 +97,7 @@ class GlobalVariables(object):
     PyiCloud            = None    # iCloud Account service
     PyiCloudInit        = None    # iCloud Account service when started from __init__ via executive job
     PyiCloudConfigFlow  = None    # iCloud Account service when started from config_flow
+    PyiCloudValidateAppleAcct = None # Validate the account username/password
 
     Waze                = None
     WazeHist            = None
@@ -141,8 +139,8 @@ class GlobalVariables(object):
     Devices_by_devicename_tracked     = {}  # All monitored Devices by devicename
     Devices_by_icloud_device_id       = {}  # Devices by the icloud device_id receive from Apple
     Devices_by_ha_device_id           = {}  # Device by the device_id in the entity/device registry
-    Devices_by_mobapp_devicename      = {}  # All verified Devices by the  conf_mobapp_devicename
     PairedDevices_by_paired_with_id   = {}  # Paired Devices by the paired_with_id (famshr prsID) id=[Dev1, Dev2]
+    Devices_by_mobapp_dname           = {}  # All verified Devices by the  conf_mobapp_devicename
 
     # FamShr Device information - These is used verify the device, display on the EvLog and in the Config Flow
     # device selection list on the iCloud3 Devices screen
@@ -155,11 +153,17 @@ class GlobalVariables(object):
     devices_without_location_data     = []
 
     devicenames_x_famshr_devices      = {}  # All ic3_devicenames by conf_famshr_devices (both ways)
-    devicenames_x_mobapp_devicenames  = {}  # All ic3_devicenames by conf_mobapp_devicename (both ways)
+    devicenames_x_mobapp_dnames       = {}  # All ic3_devicenames by conf_mobapp_devicename (both ways)
 
-    mobapp_fnames_x_mobapp_id         = {}  # All mobapp_fnames by mobapp_deviceid from HA hass.data MobApp entry (both ways)
-    mobapp_fnames_disabled            = []
-    mobile_app_device_fnames          = []  # fname = name_by_user or name in mobile_app device entry
+    # Mobile App info from the HA Entity registry
+    mobapp_id_by_mobapp_dname         = {}
+    mobapp_dname_by_mobapp_id         = {}
+
+    # Mobile App Integration info from hass_data['mobile_app'], Updated in start_ic3.check_mobile_app_integration
+    MobileApp_data                    = {}  # data dict from hass.data['mobile_app']
+    MobileApp_device_fnames           = []  # fname = name_by_user or name in mobile_app device entry
+    MobileApp_fnames_x_mobapp_id      = {}  # All mobapp_fnames by mobapp_deviceid (both ways)
+    MobileApp_fnames_disabled         = []
 
     Zones                             = []  # Zones object list
     Zones_by_zone                     = {}  # Zone object by zone name for HA Zones and iC3 Pseudo Zones

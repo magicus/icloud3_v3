@@ -47,6 +47,9 @@ from uuid       import uuid1
 from requests   import Session, adapters
 from os         import path, mkdir
 from re         import match
+import hashlib
+import srp
+import base64
 import inspect
 import json
 import traceback
@@ -68,21 +71,21 @@ APPLE_ID_VERIFICATION_CODE_INVALID_404 = 404
 AUTHENTICATION_NEEDED_421_450_500 = [421, 450, 500]
 AUTHENTICATION_NEEDED_450 = 450
 
-ICLOUD_ERROR_CODES = {
+HTTP_RESPONSE_CODES = {
     200: 'iCloud Server Responded',
     204: 'Verification Code Accepted',
     421: 'Verification Code May Be Needed',
     450: 'Verification Code May Be  Needed',
     500: 'Verification Code May Be Needed',
-    503: 'iCloud Server not Available',
+    503: 'iCloud Server not Available (Connection Error)',
     400: 'Invalid Verification Code',
     403: 'Verification Code Requested',
     404: 'iCloud http Error, Web Page not Found',
     201: 'Device Offline',
-    -2:  'iCloud Server not Available',
-    302: 'iCloud Server not Available',
+    -2:  'iCloud Server not Available (Connection Error)',
+    302: 'iCloud Server not Available (Connection Error)',
 }
-ICLOUD_ERROR_CODE_IDX = {str(code): code for code in ICLOUD_ERROR_CODES.keys()}
+HTTP_RESPONSE_CODES_IDX = {str(code): code for code in HTTP_RESPONSE_CODES.keys()}
 '''
 https://developer.apple.com/library/archive/documentation/DataManagement/Conceptual/CloudKitWebServicesReference/ErrorCodes.html#//apple_ref/doc/uid/TP40015240-CH4-SW1
 
@@ -117,10 +120,13 @@ class PyiCloudPasswordFilter(logging.Filter):
 
     def __init__(self, password):
         super(PyiCloudPasswordFilter, self).__init__(password)
-
+        self.filter_disabled_msg_displayed = False
 
     def filter(self, record):
-        # return True
+        if self.filter_disabled_msg_displayed is False:
+            self.filter_disabled_msg_displayed = True
+            _trace('PASSWORD FILTER DISABLED')
+        return True
         message = record.getMessage()
         if self.name in message:
             record.msg = message.replace(self.name, "*" * 8)
@@ -133,7 +139,7 @@ class PyiCloudSession(Session):
     '''iCloud session.'''
 
     def __init__(self, Service):
-        self.Service = Service
+        self.Service = self.PyiCloud = Service
         self.response_status_code = 0
         self.response_ok = True
 
@@ -144,6 +150,8 @@ class PyiCloudSession(Session):
         adapter = adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
 
     def request(self, method, url, **kwargs):  # pylint: disable=arguments-differ
+        if self.PyiCloud and self.PyiCloud.connection_error_retry_cnt > 5:
+            return 503
 
         # callee.function and callee.lineno provice calling function and the line number
         callee = inspect.stack()[2]
@@ -165,6 +173,7 @@ class PyiCloudSession(Session):
                         f"{callee.function}/{callee.lineno}",
                         {'raw': log_msg})
 
+        _traceha(f"{method=} {url=} {kwargs=}")
         try:
             response = None
             #++++++++++++++++ REQUEST ICLOUD DATA ++++++++++++++++
@@ -172,9 +181,16 @@ class PyiCloudSession(Session):
             response = Session.request(self, method, url, **kwargs)
 
             #++++++++++++++++ REQUEST ICLOUD DATA +++++++++++++++
+
+        except ConnectionError as err:
+            self.PyiCloud.connection_error_retry_cnt += 1
+            # log_exception(err)
+            self._raise_error(503, f"{HTTP_RESPONSE_CODES[503]}")
+            if response is None:
+                return
         except Exception as err:
             log_exception(err)
-            self._raise_error(-2, "Failed to establish a new connection")
+            self._raise_error(-2, "Other Error Setting up iCloud Server Connection ({err})")
             if response is None:
                 return
 
@@ -184,18 +200,19 @@ class PyiCloudSession(Session):
         try:
             data = response.json()
         except:
-            data = None
+            data = {}
 
         self.response_status_code = response.status_code
         self.response_ok = response.ok
+        _traceha(f"{response.status_code} {response.ok=} {data=}")
 
-        if Gb.log_rawdata_flag:
-            log_msg = ( f"ResponseCode-{response.status_code} ")
+        try:
+            if Gb.log_rawdata_flag:
+                log_msg = ( f"ResponseCode-{response.status_code} ")
 
-            if (retry_cnt == 3 or response.status_code != 200 or response.ok is False):
-                log_msg +=  (f", ResponseOK-{response.ok}, Headers-{response.headers}")
+                if (retry_cnt == 3 or response.status_code != 200 or response.ok is False):
+                    log_msg +=  (f", ResponseOK-{response.ok}, Headers-{response.headers}")
 
-            try:
                 if Gb.log_rawdata_flag_unfiltered:
                     log_rawdata_unfiltered(f"PyiCloud_ic3 iCloud Response-Header (Unfiltered), \
                                             {self.Service.instance}, {callee.function}/{callee.lineno} ",
@@ -208,34 +225,55 @@ class PyiCloudSession(Session):
                     log_rawdata(f"PyiCloud_ic3 iCloud Response-Data, \
                                             {self.Service.instance}, {callee.function}/{callee.lineno} ",
                                             {'filter': self.prefilter_rawdata(data)})
-            except Exception as err:
-                # log_exception(err)
-                pass
+        except Exception as err:
+            _traceha(f"{url=}")
+            log_exception(err)
+            pass
 
-        for header in HEADER_DATA:
-            if response.headers.get(header):
-                session_arg = HEADER_DATA[header]
-                self.Service.session_data.update({session_arg: response.headers.get(header)})
+        # Validating the username/password, code=409 is valid, code=401 is invalid
+        if (response.status_code in [401, 409]
+                and instr(url, 'setup/authenticate/')):
+            return response.status_code
 
-        with open(self.Service.session_directory_filename, "w") as outfile:
-            json.dump(self.Service.session_data, outfile)
+        try:
+            for header in HEADER_DATA:
+                if response.headers.get(header):
+                    session_arg = HEADER_DATA[header]
+                    self.Service.session_data.update({session_arg: response.headers.get(header)})
 
-        self.cookies.save(ignore_discard=True, ignore_expires=True)
+            with open(self.Service.session_directory_filename, "w") as outfile:
+                json.dump(self.Service.session_data, outfile)
 
+            self.cookies.save(ignore_discard=True, ignore_expires=True)
+
+            if data and "webservices" in data:
+                try:
+                    self.PyiCloud.webservice_findme_url_root = data["webservices"]['findme']["url"]
+                except:
+                    pass
+        except Exception as err:
+            _traceha(f"{url=}")
+            log_exception(err)
+            pass
+
+        _traceha(f"252 {response.ok=} {response.status_code} {content_type not in json_mimetypes}")
         if (response.ok is False
                 and (content_type not in json_mimetypes
                     or response.status_code in AUTHENTICATION_NEEDED_421_450_500)):
-
             try:
                 # Handle re-authentication for Find My iPhone
                 fmip_url = self.Service._get_webservice_url("findme")
-                if retry_cnt == 0 and response.status_code in AUTHENTICATION_NEEDED_421_450_500 and fmip_url in url:
+                _traceha(f"{url=} {fmip_url=} {self.PyiCloud.webservice_findme_url_root=}")
+                # if (retry_cnt == 0
+                if (response.status_code in AUTHENTICATION_NEEDED_421_450_500
+                        and self.PyiCloud.webservice_findme_url_root
+                        and url.startswith(self.PyiCloud.webservice_findme_url_root)):
                     log_debug_msg(f"Re-authenticating iCloud Account ({response.status_code})")
 
                     try:
                         # If 450, authentication requires a sign in to the account
                         service = None if response.status_code == 450 else 'find'
-                        self.Service.authenticate(True, service)
+                        self.Service.authenticate(refresh_session=True)
 
                     except PyiCloudAPIResponseException:
                         log_debug_msg("Re-authentication failed")
@@ -244,10 +282,11 @@ class PyiCloudSession(Session):
                     retry_cnt += 1
                     kwargs['retry_cnt'] = retry_cnt
                     return self.request(method, url, **kwargs)
-
-            except Exception:
+            except Exception as err:
+                log_exception(err)
                 pass
 
+            _traceha(f"279 {response.status_code} {retry_cnt=}")
             if retry_cnt == 0 and response.status_code in AUTHENTICATION_NEEDED_421_450_500:
                 self._log_debug_msg("AUTHENTICTION NEEDED, Status Code", response.status_code)
 
@@ -258,8 +297,10 @@ class PyiCloudSession(Session):
                 return self.request(method, url, **kwargs)
 
             error_code, error_reason = self._resolve_error_code_reason(data)
+            _traceha(f"289 {error_code=}, {error_reason=} {data=}")
 
-            self._raise_error(response.status_code, error_reason)
+            if error_code:
+                self._raise_error(response.status_code, error_reason)
 
         if content_type not in json_mimetypes:
             return response
@@ -404,6 +445,74 @@ class PyiCloudSession(Session):
                                 url,
                                 **kwargs)
 
+#<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+#
+#   CHECK APPLE ACCOUNT USERNAME/PASSWORD
+#
+#<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+class PyiCloudValidateAppleAcct():
+    '''
+    Use the Apple Acct Validation url to validate the username/password
+    '''
+
+    def __init__(self):
+        self.validate_apple_acct = True
+        self.username = None
+        self.password = None
+        self.connection_error_retry_cnt = 0
+
+        self.Session = PyiCloudSession(self)
+
+#----------------------------------------------------------------------------
+    def validate_username_password(self, username, password):
+        '''
+        Check if the username and password are still valid
+        The response code indicates the validity status (checked in the Session module)
+            code=409 is valid
+            code=401 is invalid
+        '''
+
+
+        self.username = username
+        self.password = password
+
+        self.session_data    = ''      #Dummy statement for PyiCloudSession
+        self.password_filter = ''      #Dummy statement for PyiCloudSession
+        self.instance        = ''      #Dummy statement for PyiCloudSession
+
+        self.username_base = f"{self.username}@".split('@')[0]
+        log_debug_msg(f"{self.username_base}, Checking Username:Password validity")
+
+        username_password = f"{username}:{password}"
+        upw = username_password.encode('ascii')
+        username_password_b64 = base64.b64encode(upw)
+        username_password_b64 = username_password_b64.decode('ascii')
+        _traceha(f"{username=} {password=}")
+
+
+        headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': 'Apple-iCloud/9.0 (Macintosh; Intel Mac OS X 10_15_1) AppleWebKit/605.1.15 (KHTML, like Gecko)',
+            'Authorization': f"Basic {username_password_b64}"}
+        url  = f"https://setup.icloud.com/setup/authenticate/{self.username}"
+        data = None
+
+        try:
+            response_code = self.Session.post(url, data=data, headers=headers)
+
+            result_msg_hdr = f"Validate Username/Password ({self.username_base}) > Valid-"
+            result_valid   = (response_code == 409)
+            log_debug_msg(f"{result_msg_hdr}{result_valid}")
+            return True            
+            return result_valid
+
+        except Exception as err:
+            log_exception(err)
+            log_debug_msg(f"Validate Username/Password ({self.username_base})Error ({err})")
+        return True
+        return False
+
 
 #<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 #
@@ -447,6 +556,7 @@ class PyiCloudService():
         self.user                = {"accountName": apple_id, "password": password}
         self.apple_id            = apple_id
         self.username            = apple_id
+        self.username_base       = apple_id.split('@')[0]
         self.password            = password
         self.is_authenticated    = False        # ICloud access has been authenticated via password or token        self.requires_2sa        = self._check_2sa_needed
         self.requires_2fa        = False        # This is set during the authentication function
@@ -454,10 +564,15 @@ class PyiCloudService():
         self.account_locked      = False        # set from the locked data item when authenticating with a token
         self.account_name        = ''
         self.verify_password     = verify_password
+        self.verify_login        = False
+        self.session_data_token  = {}
+
+        self.connection_error_retry_cnt = 0
         self.update_requested_by = ''
         self.endpoint_suffix     = endpoint_suffix if endpoint_suffix else Gb.icloud_server_endpoint_suffix
         self.instance            = instance   #  Module that created this PyiCloud object (initial, startup, config)
 
+        self.webservice_findme_url_root = ''
         self.HOME_ENDPOINT  = f"https://www.icloud.com"
         self.SETUP_ENDPOINT = f"https://setup.icloud.com/setup/ws/1"
         self.AUTH_ENDPOINT  = f"https://idmsa.apple.com/appleauth/auth"
@@ -567,7 +682,7 @@ class PyiCloudService():
         self.init_step_inprocess = ''
 
 #----------------------------------------------------------------------------
-    def authenticate(self, refresh_session=False, service=None):
+    def authenticate(self, refresh_session=False):
         '''
         Handles authentication, and persists cookies so that
         subsequent logins will not cause additional e-mails from Apple.
@@ -575,7 +690,6 @@ class PyiCloudService():
 
         login_successful         = False
         self.authenticate_method = ""
-        this_fct_error_flag = True
 
         # Do not reset requires_2fa flag on a reauthenticate session
         # It may have been set on first authentication
@@ -588,84 +702,159 @@ class PyiCloudService():
         if (refresh_session is False
                 and self.session_data.get("session_token")
                 and 'dsid' in self.params):
-            log_info_msg("Checking session token validity")
+            log_info_msg(f"{self.username_base}, Checking session token validity")
 
             if self._validate_token():
+                _traceha(f"Valid token")
                 login_successful = True
                 self.authenticate_method += ", Token"
 
-        # Authenticate with Service
-        if login_successful is False and service != None:
-            app = self.data["apps"][service]
-
-            if "canLaunchWithOneFactor" in app and app["canLaunchWithOneFactor"] == True:
-                log_debug_msg(  f"AUTHENTICATING iCloud Account Access, "
-                                f"{self.account_name} "
-                                f"({obscure_field(self.user['accountName'])}), "
-                                f"Service-{service}")
-
-                if self._authenticate_with_password_service(service):
-                    login_successful = True
-                    self.authenticate_method += (f", Password")
-
-        # Authenticate - Sign into icloud account (POST=/signin)
+        # Authenticate - Sign into Apple Account (POST=/signin)
         if login_successful is False:
-            info_msg = (f"Authenticating account {self.account_name} "
-                        f"({obscure_field(self.user['accountName'])}) with token")
-            #if self.endpoint_suffix != '':
+            info_msg = (f"{self.username_base}, Authenticating with Token")
+
             if self.endpoint_suffix:
                 info_msg += f", iCloudServerCountrySuffix-'{self.endpoint_suffix}' "
             log_info_msg(info_msg)
 
-            if self.verify_password is False:
-                # Verify that the Token is still valid, if it is we are done
+            # Verify that the Token is still valid, if it is we are done
+            if self._authenticate_with_token():
+                self.authenticate_method += ", Token"
+                login_successful = True
+
+            if login_successful is False:
+                _traceha(f"AUTH WITH PASSWORD  SRP")
+                if self._authenticate_with_password_srp():
+                    login_successful = True
+                    self.authenticate_method += ", Password"
+
+                _traceha(f"AUTH AFTER PASSWORD  SRP {self.response_code=} {login_successful=}")
+            if login_successful is False:
                 if self._authenticate_with_token():
+                    login_successful = True
                     self.authenticate_method += ", Token"
-                    login_successful = True
 
-            if login_successful is False or self.verify_password:
-                self._authenticate_with_password()
-                self.authenticate_method += ", Password"
-
-                if self._authenticate_with_token():
-                    login_successful = True
-                    self.authenticate_method += "+Token"
+        _traceha(f"AUTH AFTER EVERYTHING {self.response_code=} {login_successful=}")
 
         if login_successful is False:
             if self.response_code == 302:
-                info_msg(   f"iCloud Authentication Failed > "
+                info_msg = (f"Apple Acct > {self.username_base}, Authentication Failed, "
                             f"iCloud Server Connection Error, Error={self.response_code}")
             else:
-                info_msg = (f"iCloud Authentication Failed > "
+                info_msg = (f"Apple Acct > {self.username_base}, Authentication Failed, "
                             f"Username or Password is not valid, "
                             f"Error-{self.response_code}")
             log_info_msg(info_msg)
             raise PyiCloudFailedLoginException(info_msg)
 
         self.requires_2fa = self.requires_2fa or self._check_2fa_needed
+        self.authenticate_method = self.authenticate_method[2:]
 
         self._update_token_password_file()
 
-        self.authenticate_method = self.authenticate_method[2:]
+        log_info_msg(f"{self.username_base}, Authentication Successful, "
+                    f"Method-{self.authenticate_method}")
+
         self.is_authenticated = self.is_authenticated or login_successful
-        log_info_msg(f"Authentication completed successfully, method-{self.authenticate_method}")
+
+#----------------------------------------------------------------------------
+    # def x_authenticate(self, refresh_session=False, service=None):
+    #     '''
+    #     Handles authentication, and persists cookies so that
+    #     subsequent logins will not cause additional e-mails from Apple.
+    #     '''
+
+    #     login_successful         = False
+    #     self.authenticate_method = ""
+    #     this_fct_error_flag = True
+
+    #     # Do not reset requires_2fa flag on a reauthenticate session
+    #     # It may have been set on first authentication
+    #     if refresh_session is False:
+    #         self.requires_2fa = False
+
+    #     self.requires_2fa = self.requires_2fa or self._check_2fa_needed
+    #     _trace(f"{refresh_session=} {self.requires_2fa=}")
+
+    #     # Validate token - Consider authenticated if token is valid (POST=validate)
+    #     if (refresh_session is False
+    #             and self.session_data.get("session_token")
+    #             and 'dsid' in self.params):
+    #         log_info_msg("Checking session token validity")
+
+    #         if self._validate_token():
+    #             login_successful = True
+    #             self.authenticate_method += ", Token"
+
+
+        # # Authenticate - Sign into icloud account (POST=/signin)
+        # _traceha(f"AFTER TOKEN CHECK {login_successful=}")
+        # if login_successful is False:
+        #     info_msg = (f"Authenticating account {self.account_name} "
+        #                 f"({obscure_field(self.user['accountName'])}) with token")
+        #     #if self.endpoint_suffix != '':
+        #     if self.endpoint_suffix:
+        #         info_msg += f", iCloudServerCountrySuffix-'{self.endpoint_suffix}' "
+        #     log_info_msg(info_msg)
+        #     _traceha(f"VERIFY PASSWORD CHECK {info_msg=} {self.verify_password=}")
+
+        #     if self.verify_password is False:
+        #         # Verify that the Token is still valid, if it is we are done
+        #         if self._authenticate_with_token():
+        #             self.authenticate_method += ", Token"
+        #             login_successful = True
+
+        #     _traceha(f"AUTH PASSWORD CHECK {self.verify_password=}")
+        #     if login_successful is False or self.verify_password:
+        #         # self._authenticate_with_password()
+        #         self._authenticate_with_password_srp()
+        #         self.authenticate_method += ", Password"
+
+        #         if self._authenticate_with_token():
+        #             login_successful = True
+        #             self.authenticate_method += "+Token"
+
+        # if login_successful is False:
+        #     if self.response_code == 302:
+        #         info_msg(   f"iCloud Authentication Failed > "
+        #                     f"iCloud Server Connection Error, Error={self.response_code}")
+        #     else:
+        #         info_msg = (f"iCloud Authentication Failed > "
+        #                     f"Username or Password is not valid, "
+        #                     f"Error-{self.response_code}")
+        #     log_info_msg(info_msg)
+        #     raise PyiCloudFailedLoginException(info_msg)
+
+        # self.requires_2fa = self.requires_2fa or self._check_2fa_needed
+
+        # self._update_token_password_file()
+
+        # self.authenticate_method = self.authenticate_method[2:]
+        # self.is_authenticated = self.is_authenticated or login_successful
+        # log_info_msg(f"Authentication completed successfully, method-{self.authenticate_method}")
 
 #----------------------------------------------------------------------------
     def _authenticate_with_token(self):
         '''Authenticate using session token. Return True if successful.'''
 
         this_fct_error_flag = True
-        data = {"accountCountryCode": self.session_data.get("account_country"),
-                "dsWebAuthToken": self.session_data.get("session_token"),
-                "extended_login": True,
-                "trustToken": self.session_data.get("trust_token", ""),
-                }
+        if "account_country" in self.session_data_token:
+            data = {"accountCountryCode": self.session_data_token.get("account_country"),
+                    "dsWebAuthToken": self.session_data_token.get("session_token"),
+                    "extended_login": True,
+                    "trustToken": self.session_data_token.get("trust_token", ""),}
+        else:
+            log_debug_msg(  f"{self.username_base}, "
+                            f"Authenticate with Token > Failed, Invalid Session Data")
+            return False
 
         try:
-            req = self.Session.post(f"{self.SETUP_ENDPOINT}/accountLogin"
-                                        f"?clientBuildNumber=2021Project52&clientMasteringNumber=2021B29"
-                                        f"&clientId={self.client_id[5:]}",
-                                        data=json.dumps(data))
+            url = f"{self.SETUP_ENDPOINT}/accountLogin"
+            req = self.Session.post(url, params=self.params, data=json.dumps(data))
+            # req = self.Session.post(f"{self.SETUP_ENDPOINT}/accountLogin"
+            #                             f"?clientBuildNumber=2021Project52&clientMasteringNumber=2021B29"
+            #                             f"&clientId={self.client_id[5:]}",
+            #                             data=json.dumps(data))
 
             self.data = req.json()
 
@@ -673,6 +862,13 @@ class PyiCloudService():
                 if 'fullName' in self.data['dsInfo']:
                     self.account_name   = self.data['dsInfo']['fullName']
                     self.account_locked = self.data['dsInfo']['locked']
+
+            if 'webservices' in self.data:
+                try:
+                    if self.is_DeviceSvc_setup_complete is False:
+                        self.webservice_findme_url_root = data["webservices"]['findme']["url"]
+                except:
+                    pass
 
             if 'webservices' not in self.data:
                 if (self.data.get('success', False) is False
@@ -698,98 +894,193 @@ class PyiCloudService():
 
             return False
 
+        _traceha(f"AFTER TOKEN CHECK END")
         return False
 
 #----------------------------------------------------------------------------
-    def _authenticate_with_password(self):
-        '''
-        Sign into Apple account with password
+    # def _authenticate_with_password(self):
+    #     '''
+    #     Sign into Apple account with password
 
-        Return  - True - No errors,
-        '''
+    #     Return  - True - No errors,
+    #     '''
+    #     _traceha(f"ERROR USING OLD AUTH PASSWORD CHECK")
 
-        this_fct_error_flag = True
-        data = dict(self.user)
-        data["rememberMe"] = True
-        data["trustTokens"] = []
-        if self.session_data.get("trust_token"):
-            data["trustTokens"] = [self.session_data.get("trust_token")]
+    #     this_fct_error_flag = True
+    #     data = dict(self.user)
+    #     data["rememberMe"] = True
+    #     data["trustTokens"] = []
+    #     if self.session_data.get("trust_token"):
+    #         data["trustTokens"] = [self.self.session_data.get("trust_token")]
+
+    #     headers = self._get_auth_headers()
+
+    #     if self.session_data.get("scnt"):
+    #         headers["scnt"] = self.session_data.get("scnt")
+
+    #     if self.session_data.get("session_id"):
+    #         headers["X-Apple-ID-Session-Id"] = self.session_data.get("session_id")
+
+    #     try:
+    #         response = self.Session.post(
+    #                     f"{self.AUTH_ENDPOINT}/signin",
+    #                     params={"isRememberMeEnabled": "true"},
+    #                     data=json.dumps(data),
+    #                     headers=headers,)
+    #         data = response.json
+    #         log_debug_msg( f"Authenticate.authenticate_with_password > Successful")
+    #         return True
+
+        # except PyiCloudAPIResponseException as err:
+        #     log_debug_msg(  f"PyiCloudAPIResponseException.authenticate_with_password > "
+        #                     f"Password is not valid, "
+        #                     f"Error-{err}, 2fa Needed-{self.requires_2fa}")
+        #     raise PyiCloudFailedLoginException()
+
+        # except Exception as err:
+        #     log_debug_msg(  f"PyiCloudAPIResponseException.authenticate_with_password > "
+        #                     f"Other Error, {err}")
+        #     # log_exception(err)
+        #     return False
+
+        # return False
+
+#----------------------------------------------------------------------------
+    def _authenticate_with_password_srp(self):
+        '''
+        Sign into Apple account with password via Secure Remote Password verification
+
+        Return:
+            True - Successful login
+            False - Invalid Password or other error
+        '''
 
         headers = self._get_auth_headers()
-
         if self.session_data.get("scnt"):
             headers["scnt"] = self.session_data.get("scnt")
-
         if self.session_data.get("session_id"):
             headers["X-Apple-ID-Session-Id"] = self.session_data.get("session_id")
+        # if self.session_id:
+        #     headers["X-Apple-ID-Session-Id"] = self.session_id
+
+        class SrpPassword():
+            def __init__(self, password: str):
+                self.password = password
+
+            def set_encrypt_info(self, salt: bytes, iterations: int, key_length: int):
+                self.salt = salt
+                self.iterations = iterations
+                self.key_length = key_length
+
+            def encode(self):
+                password_hash = hashlib.sha256(self.password.encode('utf-8')).digest()
+                return hashlib.pbkdf2_hmac('sha256', password_hash, self.salt, self.iterations, self.key_length)
+
+        srp_password = SrpPassword(self.password)
+        srp.rfc5054_enable()
+        srp.no_username_in_x()
+        usr = srp.User(self.username, srp_password, hash_alg=srp.SHA256, ng_type=srp.NG_2048)
+
+        srp_username, A = usr.start_authentication()
+
+        url  = f"{self.AUTH_ENDPOINT}/signin/init"
+        data = {
+            'a': base64.b64encode(A).decode(),
+            'accountName': srp_username,
+            'protocols': ['s2k', 's2k_fo']
+        }
 
         try:
-            response = self.Session.post(
-                        f"{self.AUTH_ENDPOINT}/signin",
-                        params={"isRememberMeEnabled": "true"},
-                        data=json.dumps(data),
-                        headers=headers,)
-            data = response.json
-            log_debug_msg( f"Authenticate.authenticate_with_password > Successful")
-            return True
+            _traceha(f"GET SALT")
+            response = self.Session.post(url, data=json.dumps(data), headers=headers)
+            # response.raise_for_status()
 
-        except PyiCloudAPIResponseException as err:
-            log_debug_msg(  f"PyiCloudAPIResponseException.authenticate_with_password > "
-                            f"Password is not valid, "
-                            f"Error-{err}, 2fa Needed-{self.requires_2fa}")
-            raise PyiCloudFailedLoginException()
+        except PyiCloudAPIResponseException as error:
+            msg = "Failed to initiate srp authentication."
+            raise PyiCloudFailedLoginException(msg, error) from error
+
+        try:
+            data = response.json()
 
         except Exception as err:
-            log_debug_msg(  f"PyiCloudAPIResponseException.authenticate_with_password > "
-                            f"Other Error, {err}")
+            pass
+            data = {}
             # log_exception(err)
-            return False
 
-        return False
+        salt = base64.b64decode(data['salt'])
+        b = base64.b64decode(data['b'])
+        c = data['c']
+        iterations = data['iteration']
+        key_length = 32
+        srp_password.set_encrypt_info(salt, iterations, key_length)
+
+        m1 = usr.process_challenge( salt, b )
+        m2 = usr.H_AMK
+
+        url  = f"{self.AUTH_ENDPOINT}/signin/complete"
+        data = {
+            "accountName": srp_username,
+            "c": c,
+            "m1": base64.b64encode(m1).decode(),
+            "m2": base64.b64encode(m2).decode(),
+            "rememberMe": True,
+            "trustTokens": [self.session_data.get("trust_token", "")]
+        }
+        params = {"isRememberMeEnabled": "true"}
+
+        try:
+            _traceha(f"PASSWORD COMPLETE")
+            self.Session.post(url, params=params, data=json.dumps(data), headers=headers, )
+
+        except PyiCloudAPIResponseException as error:
+            msg = "Invalid email/password combination."
+            raise PyiCloudFailedLoginException(msg, error) from error
+
+        return self.response_code in [200, 409]
 
 #----------------------------------------------------------------------------
-    def _authenticate_with_password_service(self, service):
-        '''Authenticate to a specific service using credentials.'''
-        this_fct_error_flag = True
-        data = {"appName": service,
-                "apple_id": self.user["accountName"],
-                "password": self.user["password"],
-                "accountCountryCode": self.session_data.get("account_country"),
-                "dsWebAuthToken": self.session_data.get("session_token"),
-                "extended_login": True,
-                "trustToken": self.session_data.get("trust_token", ""),
-                }
+    # def _authenticate_with_password_service(self, service):
+    #     '''Authenticate to a specific service using credentials.'''
+    #     this_fct_error_flag = True
+    #     data = {"appName": service,
+    #             "apple_id": self.user["accountName"],
+    #             "password": self.user["password"],
+    #             "accountCountryCode": self.session_data.get("account_country"),
+    #             "dsWebAuthToken": self.session_data.get("session_token"),
+    #             "extended_login": True,
+    #             "trustToken": self.session_data.get("trust_token", ""),
+    #             }
 
-        try:
-            log_debug_msg(f"Authenticating Service with Password, Service-{service}")
+    #     try:
+    #         log_debug_msg(f"Authenticating Service with Password, Service-{service}")
 
-            self.Session.post(f"{self.SETUP_ENDPOINT}/accountLogin"
-                        f"?clientBuildNumber=2021Project52&clientMasteringNumber=2021B29"
-                        f"&clientId={self.client_id[5:]}",
-                        data=json.dumps(data))
+    #         self.Session.post(f"{self.SETUP_ENDPOINT}/accountLogin"
+    #                     f"?clientBuildNumber=2021Project52&clientMasteringNumber=2021B29"
+    #                     f"&clientId={self.client_id[5:]}",
+    #                     data=json.dumps(data))
 
-            log_debug_msg( f"Authenticate.authenticate_with_password_service > Successful")
-            return self._validate_token()
+    #         log_debug_msg( f"Authenticate.authenticate_with_password_service > Successful")
+    #         return self._validate_token()
 
-            # return True
+    #         # return True
 
-        except PyiCloudAPIResponseException as err:
-            log_debug_msg(  f"PyiCloudAPIResponseException.authenticate_with_password_service > "
-                            f"Password is not valid, "
-                            f"error-{err}, 2fa Needed-{self.requires_2fa}")
-            return False
+    #     except PyiCloudAPIResponseException as err:
+    #         log_debug_msg(  f"PyiCloudAPIResponseException.authenticate_with_password_service > "
+    #                         f"Password is not valid, "
+    #                         f"error-{err}, 2fa Needed-{self.requires_2fa}")
+    #         return False
 
-            log_exception(err)
-            msg = "Authenticate Request Failed744"
-            raise PyiCloudFailedLoginException(msg, err)
+    #         log_exception(err)
+    #         msg = "Authenticate Request Failed744"
+    #         raise PyiCloudFailedLoginException(msg, err)
 
-        except Exception as err:
-            log_debug_msg(  f"PyiCloudAPIResponseException.authenticate_with_password_service > "
-                            f"Other Error, {err}")
-            # log_exception(err)
-            return False
+    #     except Exception as err:
+    #         log_debug_msg(  f"PyiCloudAPIResponseException.authenticate_with_password_service > "
+    #                         f"Other Error, {err}")
+    #         # log_exception(err)
+    #         return False
 
-        return False
+    #     return False
 #----------------------------------------------------------------------------
     def _validate_token(self):
         '''Checks if the current access token is still valid.'''
@@ -843,17 +1134,29 @@ class PyiCloudService():
 
 #----------------------------------------------------------------------------
     def _get_auth_headers(self, overrides=None):
-        headers = { "Accept": "*/*",
-                    "Content-Type": "application/json",
-                    "X-Apple-OAuth-Client-Id": "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d",
-                    "X-Apple-OAuth-Client-Type": "firstPartyAuth",
-                    "X-Apple-OAuth-Redirect-URI": "https://www.icloud.com",
-                    "X-Apple-OAuth-Require-Grant-Code": "true",
-                    "X-Apple-OAuth-Response-Mode": "web_message",
-                    "X-Apple-OAuth-Response-Type": "code",
-                    "X-Apple-OAuth-State": self.client_id,
-                    "X-Apple-Widget-Key": "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d",
-                    }
+        # headers = { "Accept": "*/*",
+        #             "Content-Type": "application/json",
+        #             "X-Apple-OAuth-Client-Id": "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d",
+        #             "X-Apple-OAuth-Client-Type": "firstPartyAuth",
+        #             "X-Apple-OAuth-Redirect-URI": "https://www.icloud.com",
+        #             "X-Apple-OAuth-Require-Grant-Code": "true",
+        #             "X-Apple-OAuth-Response-Mode": "web_message",
+        #             "X-Apple-OAuth-Response-Type": "code",
+        #             "X-Apple-OAuth-State": self.client_id,
+        #             "X-Apple-Widget-Key": "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d",
+        #             }
+        headers = {
+            "Accept": "application/json, text/javascript",
+            "Content-Type": "application/json",
+            "X-Apple-OAuth-Client-Id": "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d",
+            "X-Apple-OAuth-Client-Type": "firstPartyAuth",
+            "X-Apple-OAuth-Redirect-URI": "https://www.icloud.com",
+            "X-Apple-OAuth-Require-Grant-Code": "true",
+            "X-Apple-OAuth-Response-Mode": "web_message",
+            "X-Apple-OAuth-Response-Type": "code",
+            "X-Apple-OAuth-State": self.client_id,
+            "X-Apple-Widget-Key": "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d",
+        }
 
         if overrides:
             headers.update(overrides)
@@ -905,6 +1208,10 @@ class PyiCloudService():
             self.session_data = {}
             with open(self.session_directory_filename) as session_f:
                 self.session_data = json.load(session_f)
+
+            if self.session_data != {}:
+                self.session_data_token.update(self.session_data)
+
         except:
             log_info_msg("Session file does not exist")
 
@@ -912,6 +1219,7 @@ class PyiCloudService():
             self.client_id = self.session_data.get("client_id")
         else:
             self.session_data.update({"client_id": self.client_id})
+            self.session_data_token.update({"client_id": self.client_id})
 
         self.Session = PyiCloudSession(self)
 

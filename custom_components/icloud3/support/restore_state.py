@@ -79,7 +79,7 @@ def read_storage_icloud3_restore_state_file():
     '''
     Read the config/.storage/.icloud3.restore_state file.
         - Extract the data into the Global Variables.
-        - Restoreeach device's sensors values
+        - Restore each device's sensors values
         - Reinitialize sensors that should not be restored
     '''
 
@@ -89,12 +89,13 @@ def read_storage_icloud3_restore_state_file():
         if Gb.restore_state_file_data == {}:
             return False
 
-        # with open(Gb.icloud3_restore_state_filename, 'r') as f:
-        #     Gb.restore_state_file_data = json.load(f)
+        Gb.restore_state_profile  = Gb.restore_state_file_data['profile']
+        Gb.restore_state_devices  = Gb.restore_state_file_data['devices']
 
-        Gb.restore_state_profile   = Gb.restore_state_file_data['profile']
-        Gb.restore_state_devices   = Gb.restore_state_file_data['devices']
-
+        # The sensors here are used in sensor.py to set the device's last sensor state values when
+        # the sensors are being set up. They are not related to the Device.sensors{} and the
+        # Device.sensors{} are not loaded here. The Device.sensors{} are loaded in the
+        # Device._restore_sensors_from_restore_state_file() function when the Device object is created.
         for devicename, devicename_data in Gb.restore_state_devices.items():
             sensors = devicename_data['sensors']
             sensors[DISTANCE_TO_OTHER_DEVICES] = {}
@@ -109,8 +110,6 @@ def read_storage_icloud3_restore_state_file():
 
         return True
 
-    # except json.decoder.JSONDecodeError:
-    #     pass
     except Exception as err:
         log_exception(err)
         return False
@@ -128,8 +127,6 @@ def write_storage_icloud3_restore_state_file():
     Gb.restore_state_file_data['devices'] = Gb.restore_state_devices
 
     try:
-        # with open(Gb.icloud3_restore_state_filename, 'w', encoding='utf8') as f:
-            # json.dump(Gb.restore_state_file_data, f, indent=4)
         success = save_json_file(Gb.icloud3_restore_state_filename, Gb.restore_state_file_data)
         return success
 

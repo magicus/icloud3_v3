@@ -382,6 +382,17 @@ def config_file_add_new_parameters():
             del conf_device[CONF_IOSAPP_DEVICE]
         update_config_file_flag = True
 
+    # Reverse v3.1 change - Change icloud to iCloud (v3.1)
+    if instr(Gb.conf_tracking[CONF_DATA_SOURCE], 'iCloud'):
+        Gb.conf_tracking[CONF_DATA_SOURCE] = \
+            Gb.conf_tracking[CONF_DATA_SOURCE].replace('iCloud', 'famshr').replace(' ', '')
+        update_config_file_flag = True
+    # Reverse v3.1 change - Change mobapp to MobApp (v3.1)
+    if instr(Gb.conf_tracking[CONF_DATA_SOURCE], 'MobApp'):
+        Gb.conf_tracking[CONF_DATA_SOURCE] = \
+            Gb.conf_tracking[CONF_DATA_SOURCE].replace('MobApp', 'mobapp').replace(' ', '')
+        update_config_file_flag = True
+
     if update_config_file_flag:
         write_storage_icloud3_configuration_file()
 

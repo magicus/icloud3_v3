@@ -19,7 +19,7 @@ from ..helpers.messaging    import (post_event, post_error_msg, post_monitor_msg
 from ..helpers.time_util    import (time_now_secs, secs_to_time, format_timer, format_age,
                                     secs_since,)
 from .pyicloud_ic3          import (PyiCloudAPIResponseException, PyiCloud2FARequiredException,
-                                    ICLOUD_ERROR_CODES, )
+                                    HTTP_RESPONSE_CODES, )
 
 
 #<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
@@ -261,7 +261,7 @@ def update_PyiCloud_RawData_data(Device, results_msg_flag=True):
 
     except (PyiCloud2FARequiredException, PyiCloudAPIResponseException) as err:
         try:
-            _err_msg = ICLOUD_ERROR_CODES.get(Gb.PyiCloud.Session.response_status_code,
+            _err_msg = HTTP_RESPONSE_CODES.get(Gb.PyiCloud.Session.response_status_code,
                             'Unknown Error')
 
             Device.icloud_acct_error_flag      = True

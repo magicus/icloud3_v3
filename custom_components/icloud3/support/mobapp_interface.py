@@ -156,7 +156,7 @@ def x_entity_name_disabled_by(sensor):
 
 def _entity_name_disabled_by(sensor):
     if sensor['disabled_by']:
-        Gb.mobapp_fnames_disabled = list_add(Gb.mobapp_fnames_disabled, sensor['device_id'])
+        Gb.MobileApp_fnames_disabled = list_add(Gb.MobileApp_fnames_disabled, sensor['device_id'])
 
     return sensor['entity_id'].replace('sensor.', '')
 

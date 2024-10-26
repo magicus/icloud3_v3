@@ -9,7 +9,8 @@ from ..const                import (HIGH_INTEGER,
                                     )
 
 from ..support              import start_ic3 as start_ic3
-from ..support.pyicloud_ic3 import (PyiCloudService, PyiCloudFailedLoginException, PyiCloudNoDevicesException,
+from ..support.pyicloud_ic3 import (PyiCloudService, PyiCloudValidateAppleAcct,
+                                    PyiCloudFailedLoginException, PyiCloudNoDevicesException,
                                     PyiCloudAPIResponseException, PyiCloud2FARequiredException,)
 
 from ..helpers.common       import (instr, list_to_str, list_add, list_del, delete_file, )
@@ -43,9 +44,18 @@ def create_PyiCloudService(PyiCloud, instance='unknown'):
     Gb.pyicloud_authentication_cnt  = 0
     Gb.pyicloud_location_update_cnt = 0
     Gb.pyicloud_calls_time          = 0.0
+    if Gb.PyiCloudValidateAppleAcct is None:
+        Gb.PyiCloudValidateAppleAcct = PyiCloudValidateAppleAcct()
 
     if Gb.username == '' or Gb.password == '':
         return
+
+    if Gb.PyiCloudValidateAppleAcct.validate_username_password(Gb.username, Gb.password) is False:
+        event_msg =(f"Apple Acct > "
+                    f"{Gb.username.split('@')[0]}, Invalid Username or Password")
+        post_event( f"{EVLOG_ALERT}{event_msg}")
+        post_startup_alert(event_msg)
+        return False
 
     if authenticate_icloud_account(PyiCloud, instance=instance, initial_setup=True):
         if ((Gb.PyiCloud and Gb.PyiCloud.is_authenticated)
@@ -204,6 +214,9 @@ def authenticate_icloud_account(PyiCloud, instance='unknown', initial_setup=Fals
 
             #PyiCloud.instance = instance    #f"{instance}-{str(id(PyiCloud))[-5:]}"
             log_debug_msg(f"PyiCloud Instance Created > {PyiCloud.instance}")
+
+        if PyiCloud and PyiCloud.connection_error_retry_cnt > 5:
+            return
 
         is_authentication_2fa_code_needed(PyiCloud, initial_setup=True)
         display_authentication_msg(PyiCloud)
@@ -397,7 +410,7 @@ def pyicloud_reset_session(PyiCloud=None):
 
         delete_pyicloud_cookies_session_files()
 
-        post_event(f"{EVLOG_NOTICE}Initializing iCloud Interface")
+        post_event(f"{EVLOG_NOTICE}Stopping Current iCloud Interface")
         PyiCloud.__init__(   Gb.username, Gb.password,
                                 cookie_directory=Gb.icloud_cookies_dir,
                                 session_directory=(f"{Gb.icloud_cookies_dir}/session"),
@@ -408,6 +421,7 @@ def pyicloud_reset_session(PyiCloud=None):
         PyiCloud = None
         Gb.verification_code = None
 
+        post_event(f"{EVLOG_NOTICE}Creating New iCloud Interface")
         authenticate_icloud_account(PyiCloud, initial_setup=True)
 
         post_event(f"{EVLOG_NOTICE}Waiting for 6-digit Verification Code Entry")

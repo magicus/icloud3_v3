@@ -272,7 +272,7 @@ def determine_interval(Device, FromZone):
         interval_method = '3.NeedInfo'
         interval_secs   = 150
 
-    elif dist_from_zone_km < 2 and dir_of_travel == AWAY_FROM:
+    elif dist_from_zone_km < 2 and dir_of_travel == AWAY_FROM and waze_interval_secs > 0:
         interval_method = '3.<2km+AwayFm'
         interval_secs   = Device.old_loc_threshold_secs  #1.5 mi & going Away
 

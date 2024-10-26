@@ -930,6 +930,9 @@ def dummy_trace():
     _trace(None, None)
 
 #--------------------------------------------------------------------
+def _evlog(devicename_or_Device, items='+'):
+    return _trace(devicename_or_Device, items)
+    
 def _trace(devicename_or_Device, items='+'):
     '''
     Display a message or variable in the Event Log
@@ -947,6 +950,9 @@ def _trace(devicename_or_Device, items='+'):
     write_ic3log_recd(f"{called_from}⛔.⛔ . . . {devicename} > {items}")
 
 #--------------------------------------------------------------------
+def _log(items, v1='+++', v2='', v3='', v4='', v5=''):
+    return _trace(items, v1, v2, v3, v4, v5)
+    
 def _traceha(items, v1='+++', v2='', v3='', v4='', v5=''):
     '''
     Display a message or variable in the HA log file

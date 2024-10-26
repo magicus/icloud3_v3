@@ -81,7 +81,7 @@ from .support           import config_file
 from .support           import service_handler
 from .support           import pyicloud_ic3_interface
 from .support.v2v3_config_migration import iCloud3_v2v3ConfigMigration
-from .support.pyicloud_ic3  import (PyiCloudService, PyiCloudException, PyiCloudFailedLoginException,
+from .support.pyicloud_ic3  import (PyiCloudValidateAppleAcct, PyiCloudFailedLoginException,
                                     PyiCloudServiceNotActivatedException, PyiCloudNoDevicesException, )
 import logging
 _CF_LOGGER = logging.getLogger("icloud3-cf")
@@ -2457,7 +2457,24 @@ class iCloud3_OptionsFlowHandler(config_entries.OptionsFlow):
 #            ICLOUD UTILITIES - LOG INTO ACCOUNT
 #
 #<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+    @staticmethod
+    async def _async_validate_username_password(username, password):
+        '''
+        Verify the username and password are valid using the Apple Acct validate
+        routine before logging into the Apple Acct. This uses one PyiCloud call to
+        validate instead of logging in and having it fail later in the process.
+        '''
+        if Gb.PyiCloudValidateAppleAcct is None:
+            Gb.PyiCloudValidateAppleAcct = PyiCloudValidateAppleAcct()
 
+        valid_apple_acct = await Gb.hass.async_add_executor_job(
+                                        Gb.PyiCloudValidateAppleAcct.validate_username_password,
+                                        username,
+                                        password)
+
+        return valid_apple_acct
+
+#--------------------------------------------------------------------
     async def _log_into_icloud_account(self, user_input, called_from_step_id=None, request_verification_code=False):
         '''
         Log into the icloud account and check to see if a verification code is needed.
@@ -2506,7 +2523,7 @@ class iCloud3_OptionsFlowHandler(config_entries.OptionsFlow):
                 and self.username == Gb.PyiCloud.username
                 and self.password == Gb.PyiCloud.password
                 and self.endpoint_suffix == Gb.PyiCloud.endpoint_suffix):
-            return
+            return True
 
         # Already logged in with same username/password
         if (self.PyiCloud
@@ -2514,7 +2531,12 @@ class iCloud3_OptionsFlowHandler(config_entries.OptionsFlow):
                 and self.username == self.PyiCloud.username
                 and self.password == self.PyiCloud.password
                 and self.endpoint_suffix == self.PyiCloud.endpoint_suffix):
-            return
+            return True
+
+        username_password_valid = await self._async_validate_username_password(self.username, self.password)
+        if username_password_valid is False:
+            self.errors['base'] = 'icloud_acct_login_error_user_pw'
+            return False
 
         if request_verification_code:
             event_msg = f"{EVLOG_NOTICE}Configure Settings > Requesting Apple ID Verification Code"
@@ -2575,7 +2597,7 @@ class iCloud3_OptionsFlowHandler(config_entries.OptionsFlow):
         self.obscure_password = obscure_field(self.password) or 'NoPassword'
 
         if self.PyiCloud.requires_2fa or request_verification_code:
-            return
+            return True
 
         self.errors   = {'base': 'icloud_acct_logged_into'}
         self.header_msg = 'icloud_acct_logged_into'

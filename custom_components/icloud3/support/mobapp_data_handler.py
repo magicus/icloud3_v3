@@ -54,6 +54,7 @@ def check_mobapp_state_trigger_change(Device):
         if device_trkr_attrs is None:
             return
 
+        Device.mobapp_data_invalid_error_cnt = 0
         mobapp_data_state      = device_trkr_attrs[DEVICE_TRACKER]
         mobapp_data_state_secs = device_trkr_attrs[f"state_{TIMESTAMP_SECS}"]
         mobapp_data_state_time = device_trkr_attrs[f"state_{TIMESTAMP_TIME}"]
@@ -400,8 +401,86 @@ def check_if_mobapp_is_alive(Device):
     except Exception as err:
         log_exception(err)
 
+
 #--------------------------------------------------------------------
 def get_mobapp_device_trkr_entity_attrs(Device):
+    '''
+    Return the state and attributes of the Mobile App device tracker.
+    The ic3 device tracker state and attributes are returned if
+    the Mobile App data is not available or an error occurs.
+
+    Return:
+        device_trkr_attrs - MobApp device tracker attrinutes if available
+        None -  error or no data is available
+    '''
+    try:
+        if (Device.mobapp_monitor_flag is False
+                or Gb.conf_data_source_MOBAPP is False):
+            return None
+
+        entity_id = Device.mobapp[DEVICE_TRACKER]
+        device_trkr_attrs = {}
+        device_trkr_attrs[DEVICE_TRACKER] = entity_io.get_state(entity_id)
+
+        if (device_trkr_attrs[DEVICE_TRACKER] == 'unavailable'
+                or LATITUDE not in device_trkr_attrs or device_trkr_attrs[LATITUDE] == 0):
+            if Device.mobapp_data_invalid_error_cnt > 50:
+                Device.mobapp_monitor_flag            = False
+                Device.mobapp_device_unavailable_flag = True
+                
+                post_event( f"{EVLOG_ALERT}The Mobile App has not reported the gps "
+                            f"location after 4 requests. It may be asleep, offline "
+                            f"or not available and should be reviewed."
+                            f"{CRLF_DOT}{Device.fname_devicename}{RARROW}{entity_id}"
+                            f"{more_info('mobapp_device_no_location')}")
+                log_error_msg(f"iCloud3 Alert ({Device.fname_devtype}) > "
+                    f"The Mobile App has not reported the gps location after 4 requests. "
+                    f"It may be asleep, offline or not available.")
+                
+        if device_trkr_attrs[DEVICE_TRACKER] == 'unavailable':
+            Device.mobapp_data_invalid_error_cnt += 1
+            if (Device.mobapp_data_invalid_error_cnt % 5) == 0:
+                post_event( f"{EVLOG_ALERT}MOBILE APP ERROR (#{Device.mobapp_data_invalid_error_cnt}) > "
+                            F"Returned a `not available` status"
+                            f"{CRLF_DOT}{Device.fname_devicename}{RARROW}{entity_id}")
+                            # f"{more_info('mobapp_device_unavailable')}")
+                log_error_msg(f"iCloud3 Error ({Device.fname}) > Mobile App status is `unavailable`")
+            return None
+
+        device_trkr_attrs.update(entity_io.get_attributes(entity_id))
+
+        if LATITUDE not in device_trkr_attrs or device_trkr_attrs[LATITUDE] == 0:
+            Device.mobapp_data_invalid_error_cnt += 1
+            if (Device.mobapp_data_invalid_error_cnt % 5) == 0:
+                post_event( f"{EVLOG_ALERT}MOBILE APP ERROR (#{Device.mobapp_data_invalid_error_cnt}) > "
+                            f"No gps location reported. It may be asleep, offline or not available"
+                            f"{CRLF_DOT}{Device.fname_devicename}{RARROW}{entity_id}")
+                            # f"{more_info('mobapp_device_no_location')}")
+                log_error_msg(f"iCloud3 Alert ({Device.fname}) > "
+                            f"Mobile App gps location not reported")
+            return None
+
+        device_trkr_attrs[CONF_IC3_DEVICENAME] = Device.devicename
+        device_trkr_attrs[f"state_{TIMESTAMP_SECS}"] = entity_io.get_last_changed_time(entity_id)
+        device_trkr_attrs[f"state_{TIMESTAMP_TIME}"] = secs_to_time(device_trkr_attrs[f"state_{TIMESTAMP_SECS}"])
+
+        if GPS_ACCURACY in device_trkr_attrs:
+            device_trkr_attrs[GPS_ACCURACY] = round(device_trkr_attrs[GPS_ACCURACY])
+        if ALTITUDE in device_trkr_attrs:
+            device_trkr_attrs[ALTITUDE] = round(device_trkr_attrs[ALTITUDE])
+        if VERT_ACCURACY in device_trkr_attrs:
+            device_trkr_attrs[VERT_ACCURACY] = round(device_trkr_attrs[VERT_ACCURACY])
+
+        #log_rawdata(f"MobApp Data - {entity_id}", device_trkr_attrs)
+
+        return device_trkr_attrs
+
+    except Exception as err:
+        log_exception(err)
+        return None
+
+#--------------------------------------------------------------------
+def v3_0_get_mobapp_device_trkr_entity_attrs(Device):
     '''
     Return the state and attributes of the Mobile App device tracker.
     The ic3 device tracker state and attributes are returned if

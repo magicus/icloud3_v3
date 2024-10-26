@@ -3,6 +3,13 @@
 **Installing for the first time_** - See [here](https://gcobb321.github.io/icloud3_v3_docs/#/chapters/3.2-installing-and-configuring) for instructions on installing as a New Installation
 **iCloud3 v3 Documentation** - iCloud3 User Guide can be found [here](https://gcobb321.github.io/icloud3_v3_docs/#/)
 
+3.0.5.10
+### Change Log - v3.0.5.10 (10/6/2024)
+1. STARTING/RESTARTING ICLOUD3:
+    - Device Sensors (Fixed) - They were being reinitialized when Restarting iCloud3 when they shouldn't have been.
+    - Mobile App entities (Fixed) - They are no longer being reinitialized when iCloud3 is restarted on a configuration change or Event Log restart request. This includes the device_tracker, battery, trigger and notify entities.
+    - Mobile App state values (Improved) - The last Mobile App state values used internally by iCloud3 are now being saved and are then restored on a restart.
+2. DEVICE TRACKING (Change) - When the device was close to Home (<2km), the interval was 15-seconds. If you made a slight turn or a jog or the road curved so the distance was slightly greater than the last update, the direction would change to AwayFrom. This caused the interval calculator to be set to 1-min when it should really retain the 15-sec setting.  The AwayFrom interval adjustment was removed from the close to Home interval calculator routine.
 
 3.0.5.9
 ### Change Log - v3.0.5.9 (9/9/2024)
